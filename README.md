@@ -1,8 +1,8 @@
 -----------------------------------------------
-WEATHERBOT USA
-FOR: Meshtastic (https://meshtastic.org/)
-BY: William Ruckman (KE8SRG)
-CONTACT: William@NWOMesh.org
+# WEATHERBOT USA
+# FOR: Meshtastic (https://meshtastic.org/)
+# BY: William Ruckman (KE8SRG)
+# CONTACT: William@NWOMesh.org
 -----------------------------------------------
 
 This is a Weather bot for Meshtastic that takes advantage of the weather.gov api for the United States and the geopy package from Nominatum for some static location functions.
@@ -12,19 +12,19 @@ Feel free to create a version for your area if you do not live in the United Sta
 
 There may be bugs. If you find any, please let me know.
 
-INSTALL MYSQL/MARIADB/PYTHON:
+# INSTALL MYSQL/MARIADB/PYTHON:
 
 apt install mysql-common python3 python3-pip
 
-CREATE DATABASE:
+# CREATE DATABASE:
 
 mysql -u root -p < CHANGME_Prepare_Database.sql
 
-PYTHON PACKAGES:
+# PYTHON PACKAGES:
 
 pip3 install bleak certifi chardet charset-normalizer dbus-fast dotmap geographiclib geopy httplib2 idna meshtastic mysql-connector-python packaging pexpect print-color protobuf ptyprocess pycurl pyparsing Pypubsub PyQRCode pyserial PySimpleSOAP pytap2 python-apt python-debian python-debianbts PyYAML reportbug requests setuptools six tabulate typing_extensions ufw urllib3 webencodings wheel
 
-UPDATE VARIABLES IN SCRIPT:
+# UPDATE VARIABLES IN SCRIPT:
 
 Make sure to read and update the important variables in the script like the database information, e-mail address for the weather.gov api, and node IP address.
 
@@ -47,11 +47,11 @@ DB_CONFIG = {
     'database': 'meshtastic_weather'
 }
 
-MANUALLY RUN SCRIPT (Recommend tmux):
+# MANUALLY RUN SCRIPT (Recommend tmux):
 
 python3 WeatherBotUSA-Meshtastic.py
 
-RUN AS A SERVICE:
+# RUN AS A SERVICE:
 
 Run your Python script as a daemon on a Debian Linux server:
 
