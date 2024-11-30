@@ -1,7 +1,4 @@
-# WEATHERBOT USA
-# FOR: Meshtastic (https://meshtastic.org/)
-# BY: William Ruckman (KE8SRG)
-# CONTACT: William@NWOMesh.org
+# WEATHERBOT USA FOR MESHTASTIC
 
 # DESCRIPTION
 This is a Weather bot for Meshtastic that takes advantage of the weather.gov api for the United States and the geopy package from Nominatum for some static location functions.
