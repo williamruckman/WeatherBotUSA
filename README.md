@@ -1,6 +1,6 @@
 # WEATHERBOT USA FOR MESHTASTIC
 
-# DESCRIPTION
+# Description
 This is a Weather bot for Meshtastic that takes advantage of the weather.gov api for the United States and the geopy package from Nominatum for some static location functions.
 Nodes can also get dynamic weather and alerts based on their nodes current location advertised to the mesh.
 
