@@ -89,12 +89,28 @@ def register_node(node_id, latitude, longitude):
     db = connect_to_database()
     if db:
         cursor = db.cursor()
-        query = "INSERT INTO severe_weather_subscriptions (node_id, latitude, longitude) VALUES (%s, %s, %s)"
-        cursor.execute(query, (node_id, latitude, longitude))
-        db.commit()
+        # Check if the node already exists in the database
+        check_query = "SELECT COUNT(*) FROM severe_weather_subscriptions WHERE node_id = %s"
+        cursor.execute(check_query, (node_id,))
+        (count,) = cursor.fetchone()
+
+        if count > 0:
+            print(f"Node {node_id} is already subscribed.")
+            send_message(node_id, "You are already subscribed to weather alerts.")
+        else:
+            # Insert the node if it does not exist
+            query = "INSERT INTO severe_weather_subscriptions (node_id, latitude, longitude) VALUES (%s, %s, %s)"
+            cursor.execute(query, (node_id, latitude, longitude))
+            db.commit()
+            print(f"Node {node_id} successfully subscribed.")
+            send_message(node_id, "You are now subscribed to weather alerts.")
+            send_message(node_id, "If your location updates on your node at a later time, it will dynamically update.")
+
         cursor.close()
         db.close()
-        # Perform an immediate weather alert check upon registration
+
+    # Perform an immediate weather alert check upon registration (only if newly added)
+    if count == 0:
         send_weather_alerts(node_id, latitude, longitude, is_initial_check=True)
 
 # Remove node from the subscription database
@@ -468,8 +484,7 @@ def handle_message(packet):
                     if latitude and longitude:
                         try:
                             register_node(node_id, str(latitude), str(longitude))
-                            send_message(node_id, "You are now subscribed to weather alerts.")
-                            send_message(node_id, "If your location updates on your node at a later time, it will dynamically update.")
+
                         except Exception as e:
                             print(f"Error during subscription: {e}")
                             send_message(node_id, "There was an error during the subscription process. Please check your coordinates and try again.")
@@ -492,8 +507,7 @@ def handle_message(packet):
                                         send_message(node_id, f"Error: Unable to fetch weather data for {resolved_city_state}. Please check the coordinates.")
                                     else:
                                         register_node(node_id, str(latitude), str(longitude))
-                                        send_message(node_id, f"You are now subscribed to weather alerts for {resolved_city_state}.")
-                                        send_message(node_id, "If you enable GPS or location on your node at a later time, it will dynamically update.")
+
                                 except Exception as e:
                                     send_message(node_id, f"An error occurred: {e}")
                                     print(f"Error during subscription: {e}")
@@ -509,8 +523,7 @@ def handle_message(packet):
                                         send_message(node_id, f"Error: Unable to fetch weather data for coordinates ({lat}, {lon}). Please check the coordinates.")
                                     else:
                                         register_node(node_id, str(lat), str(lon))
-                                        send_message(node_id, f"You are now subscribed to weather alerts for coordinates ({lat}, {lon}).")
-                                        send_message(node_id, "If you enable GPS or location on your node at a later time, it will dynamically update.")
+
                                 else:
                                     send_message(node_id, "Invalid latitude/longitude format. Please try again.")
                             except ValueError:
