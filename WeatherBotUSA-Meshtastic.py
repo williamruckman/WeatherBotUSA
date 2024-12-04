@@ -126,8 +126,16 @@ def get_weather_alerts(latitude, longitude):
 
 # Send message to node
 def send_message(node_id, message):
-    interface.sendText(message, node_id)
-    print(f"Sent message to node {node_id}: {message}")
+    # Define the maximum size for each data packet (adjust based on Meshtastic limitations)
+    max_packet_size = 220  # Example size, lower if you have issues; Estimated for longfast, 5 hops, and encryption
+
+    # Split the message into chunks if it exceeds the maximum size
+    message_parts = [message[i:i + max_packet_size] for i in range(0, len(message), max_packet_size)]
+
+    # Send each part individually
+    for part in message_parts:
+        interface.sendText(part, node_id)
+        print(f"Sent message to node {node_id}: {part}")
 
 # Send weather alerts
 def send_weather_alerts(node_id, latitude, longitude, is_initial_check=False):
@@ -680,4 +688,3 @@ try:
         time.sleep(1)
 finally:
     interface.close()
-
