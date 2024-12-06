@@ -1,4 +1,5 @@
 # WEATHERBOT USA FOR MESHTASTIC
+![](WeatherBotUSA.png)
 
 # Description
 This is a Weather bot for Meshtastic that takes advantage of the weather.gov api for the United States and the geopy package from Nominatum for some static location functions.
