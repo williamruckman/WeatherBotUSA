@@ -3,6 +3,7 @@ import time
 import threading
 import meshtastic
 import meshtastic.tcp_interface
+import meshtastic.util
 import mysql.connector
 import requests
 import re
@@ -50,6 +51,12 @@ print(banner)
 # Pause for 3 seconds for banner display at script start
 time.sleep(3)
 
+def custom_exit(message):
+    print(f"Custom exit override: {message}")
+    return  # Prevent termination
+
+meshtastic.util.our_exit = custom_exit
+
 # define logic for retries to weather.gov API on failure
 def retry(api_function):
     @wraps(api_function)
@@ -83,8 +90,19 @@ def clean_coordinates(coord):
 
 # Add node to the database and check for weather alerts immediately
 def register_node(node_id, latitude, longitude):
+    """
+    Registers a node in the database with the given location.
+    """
     latitude = clean_coordinates(latitude)
     longitude = clean_coordinates(longitude)
+
+    # Convert node_id to hexadecimal format for Meshtastic
+    hex_node_id = convert_to_hex(node_id)
+    print(f"Converted node_id {node_id} to Meshtastic-compatible hex_node_id {hex_node_id}")
+
+    # Validate the node in Meshtastic's node database
+    if not is_node_in_meshtastic(hex_node_id, node_id):
+        print(f"Warning: NodeId {hex_node_id} not found in Meshtastic nodes. Proceeding with registration.")
 
     db = connect_to_database()
     if db:
@@ -118,11 +136,24 @@ def remove_node(node_id):
     db = connect_to_database()
     if db:
         cursor = db.cursor()
-        query = "DELETE FROM severe_weather_subscriptions WHERE node_id = %s"
-        cursor.execute(query, (node_id,))
-        db.commit()
-        cursor.close()
-        db.close()
+        try:
+            # Remove active alerts for the node
+            print(f"Removing active alerts for node {node_id}.")
+            delete_alerts_query = "DELETE FROM node_alerts WHERE node_id = %s"
+            cursor.execute(delete_alerts_query, (node_id,))
+            
+            # Remove the node from subscriptions
+            print(f"Removing subscription for node {node_id}.")
+            delete_subscription_query = "DELETE FROM severe_weather_subscriptions WHERE node_id = %s"
+            cursor.execute(delete_subscription_query, (node_id,))
+
+            db.commit()
+            print(f"Successfully removed node {node_id} and its active alerts.")
+        except Exception as e:
+            print(f"Error removing node {node_id}: {e}")
+        finally:
+            cursor.close()
+            db.close()
 
 # Weather alert retrieval
 @retry
@@ -142,50 +173,166 @@ def get_weather_alerts(latitude, longitude):
 
 # Send message to node
 def send_message(node_id, message):
-    # Define the maximum size for each data packet (adjust based on Meshtastic limitations)
-    max_packet_size = 220  # Example size, lower if you have issues; Estimated for longfast, 5 hops, and encryption
+    """
+    Sends a message to the specified node.
+    """
+    # Convert node_id to hexadecimal format
+    hex_node_id = convert_to_hex(node_id)
+    print(f"Converted node_id {node_id} to Meshtastic-compatible hex_node_id {hex_node_id}")
+
+    # Validate the node in Meshtastic's node database
+    if not is_node_in_meshtastic(hex_node_id, node_id):
+        print(f"Warning: NodeId {hex_node_id} not found in Meshtastic nodes. Skipping message.")
+        return
+
+    # Define the maximum size for each data packet
+    max_packet_size = 220
 
     # Split the message into chunks if it exceeds the maximum size
     message_parts = [message[i:i + max_packet_size] for i in range(0, len(message), max_packet_size)]
 
     # Send each part individually
     for part in message_parts:
-        interface.sendText(part, node_id)
-        print(f"Sent message to node {node_id}: {part}")
+        try:
+            interface.sendText(part, hex_node_id)
+            print(f"Sent message to node {hex_node_id}: {part}")
+        except Exception as e:
+            print(f"Error sending message to node {hex_node_id}: {e}")
+
+def validate_node_id(node_id):
+    # Debug available nodes
+    print("Validating node_id against Meshtastic nodes:")
+    for node in interface.nodes.values():
+        print(f"Node ID: {node['num']}, User: {node.get('user', 'Unknown')}")
+
+    # Check if node_id is in the list
+    if str(node_id) in [str(node['num']) for node in interface.nodes.values()]:
+        return True
+    print(f"Warning: Node {node_id} not found in Meshtastic nodes.")
+    return False
 
 # Send weather alerts
 def send_weather_alerts(node_id, latitude, longitude, is_initial_check=False):
+    """
+    Sends weather alerts to the specified node based on its location.
+    """
     print(f"Fetching weather alerts for node {node_id} at ({latitude}, {longitude})...")
     alerts = get_weather_alerts(latitude, longitude)
 
-    if alerts:
-        print(f"Number of alerts for node {node_id}: {len(alerts)}")
+    # Convert node_id to hexadecimal format
+    hex_node_id = convert_to_hex(node_id)
+
+    # Validate the node in Meshtastic
+    if not is_node_in_meshtastic(hex_node_id, node_id):
+        print(f"Warning: NodeId {hex_node_id} not found in Meshtastic nodes. Skipping alert delivery.")
+        return
+
+    db = connect_to_database()
+    if not db:
+        print("Database connection failed. Cannot process weather alerts.")
+        return
+
+    try:
+        cursor = db.cursor(dictionary=True)
+        # Fetch existing alerts for the node
+        cursor.execute("SELECT alert_id, headline FROM node_alerts WHERE node_id = %s", (node_id,))
+        existing_alerts = {row['alert_id']: row['headline'] for row in cursor.fetchall()}
+        print(f"Existing alerts for node {node_id}: {existing_alerts}")
+
+        current_alerts = {}
+        new_alerts_sent = False
+
         for alert in alerts:
+            alert_id = alert['id']
             headline = alert['properties'].get('headline', 'No headline available')
-            print(f"Alert for node {node_id}: {headline}")
-            send_message(node_id, f"⚠️Weather alert⚠️: {headline}")
-    elif is_initial_check:
-        print(f"No active weather alerts for node {node_id} at ({latitude}, {longitude}).")
-        send_message(node_id, "No active weather alerts for your location.")
+            details = alert['properties'].get('description', 'No additional details available.')
+            print(f"Processing alert for node {node_id}: {headline}")
+            current_alerts[alert_id] = headline
+
+            if alert_id not in existing_alerts:
+                # New alert detected
+                message = f"🚨 Weather alert:\n{headline}\nSend 'M' for more details."
+                send_message(node_id, message)
+                new_alerts_sent = True
+                # Insert the alert into the database
+                cursor.execute(
+                    "INSERT INTO node_alerts (node_id, alert_id, headline, details) VALUES (%s, %s, %s, %s)",
+                    (node_id, alert_id, headline, details),
+                )
+                db.commit()
+
+        # Identify alerts that are no longer active
+        canceled_alerts = set(existing_alerts.keys()) - set(current_alerts.keys())
+        for alert_id in canceled_alerts:
+            canceled_headline = existing_alerts[alert_id]
+            print(f"Removed alert {alert_id} for node {node_id}")
+            send_message(node_id, f"⚠️ Weather alert canceled: {canceled_headline}")
+            # Remove the alert from the database
+            cursor.execute(
+                "DELETE FROM node_alerts WHERE node_id = %s AND alert_id = %s",
+                (node_id, alert_id),
+            )
+            db.commit()
+
+        # Check if there are new active alerts after cancellations
+        if canceled_alerts and current_alerts:
+            active_alerts_summary = "\n".join(
+                [f"🚨 Active alert: {headline}" for headline in current_alerts.values()]
+            )
+            send_message(node_id, f"Following the cancellation, these alerts remain active:\n{active_alerts_summary}")
+        elif canceled_alerts and not current_alerts:
+            send_message(node_id, "✅ All clear! No active weather alerts for your location.")
+
+    except Exception as e:
+        print(f"Error processing weather alerts for node {node_id}: {e}")
+    finally:
+        cursor.close()
+        db.close()
+
+def is_node_in_meshtastic(hex_node_id, decimal_node_id=None):
+    """
+    Check if the given node_id exists in Meshtastic's known nodes.
+    Tries both hexadecimal and decimal representations for robustness.
+    """
+    # Refresh the Meshtastic node list to ensure it's up-to-date
+    interface.showNodes()
+
+    # Debugging: Print all nodes for verification
+    #print("Debugging Meshtastic nodes:")
+    #for node_key, node_info in interface.nodes.items():
+    #    print(f"Node Key: {node_key}, Node Info: {node_info}")
+
+    # Check for the node in both hexadecimal and decimal formats
+    for node_key, node in interface.nodes.items():
+        if node.get("user", {}).get("id") == hex_node_id or node_key == decimal_node_id:
+            #print(f"Found node in Meshtastic: {node}")
+            return True
+
+    print(f"Node {hex_node_id} or {decimal_node_id} not found in Meshtastic nodes.")
+    return False
 
 # Periodic weather alert check
 def check_weather_alerts():
     db = connect_to_database()
     if db:
+        #print("Database connection established.")  # Debugging
         cursor = db.cursor(dictionary=True)
-        query = "SELECT node_id, latitude, longitude FROM severe_weather_subscriptions"
+        query = "SELECT node_id, latitude, longitude, first_subscription FROM severe_weather_subscriptions"
         cursor.execute(query)
         nodes = cursor.fetchall()
 
         for node in nodes:
-            node_id = node['node_id']
+            node_id = str(node['node_id']).strip()  # Ensure node_id is treated as a string and stripped of extra spaces
             db_latitude = node['latitude']
             db_longitude = node['longitude']
+            first_subscription = node['first_subscription']  # Get the first_subscription flag
 
-            # Fetch updated location
+            print(f"Checking for node {node_id} (first_subscription={first_subscription})")
+
+            # Fetch updated location for the node
             updated_latitude, updated_longitude = get_node_info(node_id)
 
-            # Validate updated coordinates
+            # Validate updated coordinates and compare with database
             if (
                 updated_latitude is not None and updated_longitude is not None
                 and is_valid_coordinates(updated_latitude, updated_longitude)
@@ -198,18 +345,42 @@ def check_weather_alerts():
                 # Update database with new coordinates
                 update_query = "UPDATE severe_weather_subscriptions SET latitude = %s, longitude = %s WHERE node_id = %s"
                 cursor.execute(update_query, (updated_latitude, updated_longitude, node_id))
-                db.commit()
+                db.commit()  # Commit the update to ensure it is saved in the database
+                print(f"Committed update to database for node {node_id}.")
                 latitude, longitude = updated_latitude, updated_longitude
             else:
-                # Keep existing coordinates
+                # Use existing coordinates from the database
                 print(f"Using existing location for node {node_id} ({db_latitude}, {db_longitude})...")
                 latitude, longitude = db_latitude, db_longitude
 
-            # Send weather alerts
-            send_weather_alerts(node_id, latitude, longitude)
+            # Check if the node is already subscribed (exists in the database)
+            print(f"Executing query to check for node_id: {node_id}")
+            cursor.execute("SELECT node_id FROM severe_weather_subscriptions WHERE node_id = %s", (node_id,))
+            node_check = cursor.fetchone()
+            print(f"Query result for node_id {node_id}: {node_check}")  # Debugging
+
+            if not node_check:
+                print(f"Warning: NodeId {node_id} not found in DB")  # Debugging
+                # First time subscription, send the "no alerts" message
+                send_message(node_id, "There are no active weather alerts for your current location.")
+
+                # Commit and update the first_subscription flag to False
+                cursor.execute("UPDATE severe_weather_subscriptions SET first_subscription = FALSE WHERE node_id = %s", (node_id,))
+                db.commit()  # Commit the update to ensure changes are visible
+                print(f"Committed update to first_subscription for node {node_id}.")
+                continue  # Skip processing alerts for this node as it's not properly subscribed
+
+            # Process alerts for the node
+            try:
+                print(f"Processing alerts for node {node_id} at ({latitude}, {longitude})...")
+                send_weather_alerts(node_id, latitude, longitude)
+            except Exception as e:
+                print(f"Error processing weather alerts for node {node_id}: {e}")
 
         cursor.close()
         db.close()
+    else:
+        print("Database connection failed. Cannot check weather alerts.")
 
     # Schedule the next execution in 15 minutes
     threading.Timer(900, check_weather_alerts).start()
@@ -247,14 +418,14 @@ def parse_nodes_data(nodes_data):
 # Get node information
 def get_node_info(node_id):
     try:
-        # Convert node_id to integer
+        # Convert node_id to integer and then to hex format
         int_node_id = int(node_id)
         hex_node_id = f"!{hex(int_node_id)[2:]}"  # Convert node ID to hex format with '!' prefix
         nodes_data = interface.showNodes()  # Get nodes data
         nodes = parse_nodes_data(nodes_data)  # Parse the data into a list of dictionaries
 
         for n in nodes:
-            if n.get('ID', '') == hex_node_id:
+            if n.get('ID', '').strip() == hex_node_id:
                 latitude = n.get('Latitude')
                 longitude = n.get('Longitude')
                 # Clean up and validate coordinates before returning
@@ -287,6 +458,12 @@ def is_valid_coordinates(latitude, longitude):
     except ValueError:
         pass
     return False
+
+def convert_to_hex(node_id):
+    """
+    Convert a decimal node_id to Meshtastic-compatible hexadecimal format.
+    """
+    return f"!{hex(int(node_id))[2:]}"
 
 # Get latutude and longitude from city, state
 def get_coordinates_from_city_state(city_state):
@@ -466,6 +643,56 @@ def get_five_day_forecast(location):
     except requests.exceptions.RequestException as e:
         print(f"Error fetching 5-day forecast: {e}")
         return f"Error fetching forecast for {location}. Please try again later."
+
+def get_active_alerts_for_node(node_id):
+    """
+    Retrieve active alerts for a specific node from the database.
+    """
+    db = connect_to_database()
+    if db:
+        try:
+            cursor = db.cursor(dictionary=True)
+            query = "SELECT alert_id, headline FROM node_alerts WHERE node_id = %s"
+            cursor.execute(query, (node_id,))
+            results = cursor.fetchall()
+            # Return a dictionary of alert_id to headline
+            return {row["alert_id"]: row["headline"] for row in results}
+        except mysql.connector.Error as err:
+            print(f"Error retrieving active alerts for node {node_id}: {err}")
+            return {}
+        finally:
+            cursor.close()
+            db.close()
+    else:
+        print("Database connection failed.")
+        return {}
+
+def get_detailed_weather_alert(alert_id):
+    """
+    Fetch detailed weather alert information from the node_alerts table.
+    """
+    db = connect_to_database()
+    if db:
+        try:
+            cursor = db.cursor(dictionary=True)
+            query = "SELECT details FROM node_alerts WHERE alert_id = %s"
+            cursor.execute(query, (alert_id,))
+            result = cursor.fetchone()
+
+            if result and result["details"]:
+                return result["details"]
+            else:
+                print(f"No detailed alert found for alert ID: {alert_id}")
+                return None
+        except mysql.connector.Error as err:
+            print(f"Error retrieving detailed alert for alert ID {alert_id}: {err}")
+            return None
+        finally:
+            cursor.close()
+            db.close()
+    else:
+        print("Database connection failed.")
+        return None
 
 # Handle incoming message
 def handle_message(packet):
@@ -665,6 +892,19 @@ def handle_message(packet):
                                     send_message(node_id, "Invalid latitude/longitude format. Please try again.")
                             except ValueError:
                                 send_message(node_id, "Invalid city/state or coordinates format. Please ensure you use 'City, State' or 'latitude longitude'.")
+
+                # "More Info" or "M"
+                elif message_text in ["more", "m"]:
+                    active_alerts = get_active_alerts_for_node(node_id)
+                    if active_alerts:
+                        for alert_id, headline in active_alerts.items():
+                            detailed_alert = get_detailed_weather_alert(alert_id)
+                            if detailed_alert:
+                                send_message(node_id, detailed_alert)
+                            else:
+                                send_message(node_id, f"No additional details available for alert: {headline}")
+                    else:
+                        send_message(node_id, "No active weather alerts to provide more information on.")
 
                 elif message_text in ["unsubscribe", "u"]:
                     print(f"Processing unsubscribe request for node {node_id}.")
