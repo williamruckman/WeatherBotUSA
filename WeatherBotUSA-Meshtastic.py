@@ -31,6 +31,10 @@ DB_CONFIG = {
     'database': 'meshtastic_weather'
 }
 
+# Maximum packet size for messages sent to nodes
+# If some packets fail to send, lower this by 10 until they do.
+MAX_PACKET_SIZE = 210
+
 # Banner to be printed when the script starts
 banner = r"""
 -----------------------------------------------
@@ -133,27 +137,36 @@ def register_node(node_id, latitude, longitude):
 
 # Remove node from the subscription database
 def remove_node(node_id):
+    """
+    Remove a node from the subscription database and purge associated alerts.
+    """
     db = connect_to_database()
     if db:
-        cursor = db.cursor()
+        cursor = None
         try:
+            cursor = db.cursor()
+
             # Remove active alerts for the node
-            print(f"Removing active alerts for node {node_id}.")
+            print(f"Debug: Removing active alerts for node {node_id}.")
             delete_alerts_query = "DELETE FROM node_alerts WHERE node_id = %s"
             cursor.execute(delete_alerts_query, (node_id,))
-            
+
             # Remove the node from subscriptions
-            print(f"Removing subscription for node {node_id}.")
+            print(f"Debug: Removing subscription for node {node_id}.")
             delete_subscription_query = "DELETE FROM severe_weather_subscriptions WHERE node_id = %s"
             cursor.execute(delete_subscription_query, (node_id,))
 
             db.commit()
-            print(f"Successfully removed node {node_id} and its active alerts.")
-        except Exception as e:
-            print(f"Error removing node {node_id}: {e}")
+            print(f"Debug: Successfully removed node {node_id} and its active alerts.")
+        except mysql.connector.Error as err:
+            print(f"Error removing node {node_id}: {err}")
         finally:
-            cursor.close()
-            db.close()
+            if cursor:
+                cursor.close()
+            if db.is_connected():
+                db.close()
+    else:
+        print(f"Database connection failed while attempting to remove node {node_id}.")
 
 # Weather alert retrieval
 @retry
@@ -186,7 +199,7 @@ def send_message(node_id, message):
         return
 
     # Define the maximum size for each data packet
-    max_packet_size = 220
+    max_packet_size = MAX_PACKET_SIZE  # Use the global variable
 
     # Split the message into chunks if it exceeds the maximum size
     message_parts = [message[i:i + max_packet_size] for i in range(0, len(message), max_packet_size)]
@@ -196,6 +209,7 @@ def send_message(node_id, message):
         try:
             interface.sendText(part, hex_node_id)
             print(f"Sent message to node {hex_node_id}: {part}")
+            time.sleep(0.1)  # Add a 100ms delay between packets
         except Exception as e:
             print(f"Error sending message to node {hex_node_id}: {e}")
 
@@ -283,8 +297,8 @@ def send_weather_alerts(node_id, latitude, longitude, is_initial_check=False):
         elif canceled_alerts and not current_alerts:
             send_message(node_id, "✅ All clear! No active weather alerts for your location.")
 
-    except Exception as e:
-        print(f"Error processing weather alerts for node {node_id}: {e}")
+    except mysql.connector.Error as err:
+        print(f"Error processing weather alerts for node {node_id}: {err}")
     finally:
         cursor.close()
         db.close()
@@ -650,49 +664,139 @@ def get_active_alerts_for_node(node_id):
     """
     db = connect_to_database()
     if db:
+        cursor = None  # Initialize cursor
         try:
             cursor = db.cursor(dictionary=True)
             query = "SELECT alert_id, headline FROM node_alerts WHERE node_id = %s"
             cursor.execute(query, (node_id,))
+            
+            # Fetch all results to ensure the cursor is emptied
             results = cursor.fetchall()
-            # Return a dictionary of alert_id to headline
-            return {row["alert_id"]: row["headline"] for row in results}
+
+            if results:
+                print(f"Debug: Active alerts for node {node_id}: {results}")
+                return {row["alert_id"]: row["headline"] for row in results}
+            else:
+                print(f"Debug: No active alerts found for node {node_id}. Query result: {results}")
+                return {}
         except mysql.connector.Error as err:
-            print(f"Error retrieving active alerts for node {node_id}: {err}")
+            print(f"Error in get_active_alerts_for_node: {err}")
             return {}
         finally:
-            cursor.close()
-            db.close()
+            # Ensure cursor and connection are closed even if an exception occurs
+            if cursor:
+                cursor.close()
+            if db.is_connected():
+                db.close()
     else:
-        print("Database connection failed.")
+        print("Database connection failed while fetching active alerts.")
         return {}
 
-def get_detailed_weather_alert(alert_id):
+def get_all_alert_details():
     """
-    Fetch detailed weather alert information from the node_alerts table.
+    Fetch all active alerts and their details for all nodes.
     """
     db = connect_to_database()
     if db:
+        cursor = None
         try:
             cursor = db.cursor(dictionary=True)
-            query = "SELECT details FROM node_alerts WHERE alert_id = %s"
-            cursor.execute(query, (alert_id,))
-            result = cursor.fetchone()
-
-            if result and result["details"]:
-                return result["details"]
-            else:
-                print(f"No detailed alert found for alert ID: {alert_id}")
-                return None
-        except mysql.connector.Error as err:
-            print(f"Error retrieving detailed alert for alert ID {alert_id}: {err}")
-            return None
-        finally:
+            query = "SELECT alert_id, details FROM node_alerts"
+            cursor.execute(query)
+            results = cursor.fetchall()  # Fetch all alerts once
+            
+            # Close cursor and connection immediately
             cursor.close()
             db.close()
+
+            if results:
+                print(f"Debug: All active alerts fetched: {results}")
+                return {row["alert_id"]: row["details"] for row in results}
+            else:
+                print("Debug: No active alerts found.")
+                return {}
+        except mysql.connector.Error as err:
+            print(f"Error in get_all_alert_details: {err}")
+            return {}
+        finally:
+            if cursor:
+                cursor.close()
+            if db.is_connected():
+                db.close()
     else:
-        print("Database connection failed.")
-        return None
+        print("Database connection failed while fetching all alert details.")
+        return {}
+
+def process_node_alerts(node_id, all_alert_details):
+    """
+    Process alerts for a single node based on pre-fetched alert details.
+    Sends a message if no active alerts are available.
+    """
+    db = connect_to_database()
+    if db:
+        cursor = None
+        try:
+            cursor = db.cursor(dictionary=True)
+            query = "SELECT alert_id, headline FROM node_alerts WHERE node_id = %s"
+            cursor.execute(query, (node_id,))
+            node_alerts = cursor.fetchall()
+
+            print(f"Debug: Active alerts for node {node_id}: {node_alerts}")
+
+            if not node_alerts:
+                # No active alerts for the node
+                send_message(node_id, "There are no active weather alerts for your location at this time.")
+                print(f"Debug: No active alerts for node {node_id}. Message sent.")
+                return
+
+            # Process and send details for active alerts
+            for alert in node_alerts:
+                alert_id = alert["alert_id"]
+                headline = alert["headline"]
+                details = all_alert_details.get(alert_id, "Details unavailable")
+
+                print(f"Debug: Processing alert {alert_id} for node {node_id}")
+                send_message(node_id, f"🚨 {headline}\n{details}")
+        except mysql.connector.Error as err:
+            print(f"Error processing alerts for node {node_id}: {err}")
+        finally:
+            if cursor:
+                cursor.close()
+            if db.is_connected():
+                db.close()
+    else:
+        print(f"Database connection failed while processing alerts for node {node_id}.")
+        send_message(node_id, "There are no active weather alerts for your location at this time.")
+
+def process_all_nodes():
+    """
+    Process alerts for all nodes in the severe_weather_subscriptions table.
+    """
+    db = connect_to_database()
+    if db:
+        cursor = None
+        try:
+            cursor = db.cursor(dictionary=True)
+            query = "SELECT node_id FROM severe_weather_subscriptions"
+            cursor.execute(query)
+            nodes = cursor.fetchall()
+
+            print(f"Debug: Nodes fetched for processing: {nodes}")
+
+            # Fetch all alert details once
+            all_alert_details = get_all_alert_details()
+
+            for node in nodes:
+                process_node_alerts(node["node_id"], all_alert_details)
+        except mysql.connector.Error as err:
+            print(f"Error fetching nodes for processing: {err}")
+        finally:
+            if cursor:
+                cursor.close()
+            if db.is_connected():
+                db.close()
+    else:
+        print("Database connection failed while fetching nodes.")
 
 # Handle incoming message
 def handle_message(packet):
@@ -895,14 +999,10 @@ def handle_message(packet):
 
                 # "More Info" or "M"
                 elif message_text in ["more", "m"]:
-                    active_alerts = get_active_alerts_for_node(node_id)
-                    if active_alerts:
-                        for alert_id, headline in active_alerts.items():
-                            detailed_alert = get_detailed_weather_alert(alert_id)
-                            if detailed_alert:
-                                send_message(node_id, detailed_alert)
-                            else:
-                                send_message(node_id, f"No additional details available for alert: {headline}")
+                    print(f"Debug: 'More info' command received from node {node_id}.")
+                    all_alert_details = get_all_alert_details()  # Fetch all alert details once
+                    if all_alert_details:
+                        process_node_alerts(node_id, all_alert_details)  # Process for the specific node
                     else:
                         send_message(node_id, "No active weather alerts to provide more information on.")
 
