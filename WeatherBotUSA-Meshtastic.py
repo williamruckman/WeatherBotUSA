@@ -32,7 +32,6 @@ DB_CONFIG = {
 }
 
 # Maximum packet size for messages sent to nodes
-# If some packets fail to send, lower this by 10 until they do.
 MAX_PACKET_SIZE = 210
 
 # Banner to be printed when the script starts
@@ -408,22 +407,28 @@ def parse_nodes_data(nodes_data):
     nodes = []
 
     for row in rows:
-        # Skip the separator rows
-        if row.startswith("╒") or row.startswith("╞"):
+        # Skip table border lines and titles
+        if not row.strip().startswith("│"):
             continue
 
-        # Split each row into columns (use '│' as delimiter)
+        # Split each row into columns using '│' as delimiter
         columns = [col.strip() for col in row.split("│") if col.strip()]
 
-        # Ensure there are enough columns to process a node
-        if len(columns) >= 12:
+        # Check that the row has enough columns before accessing them
+        if len(columns) >= 18:
             node = {
-                "ID": columns[2],
                 "User": columns[1],
-                "Latitude": columns[6],
-                "Longitude": columns[7],
-                "Altitude": columns[8],
-                # Add more columns as needed
+                "ID": columns[2],
+                "AKA": columns[3],
+                "Hardware": columns[4],
+                "Pubkey": columns[5],
+                "Role": columns[6],
+                "Latitude": columns[7],
+                "Longitude": columns[8],
+                "Altitude": columns[9],
+                "Battery": columns[10],
+                "LastHeard": columns[16],
+                "Since": columns[17]
             }
             nodes.append(node)
 
