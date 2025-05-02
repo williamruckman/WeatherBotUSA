@@ -7,10 +7,13 @@ import meshtastic.util
 import mysql.connector
 import requests
 import re
+import io
 from pubsub import pub
 from geopy.geocoders import Nominatim
 from functools import wraps
 import urllib.parse
+
+VERBOSE = False  # Set True to see the full interface.showNodes() output
 
 # Define the hostname variable. The IP of the Meshtastic node to connect to.
 hostname = '127.0.0.1'
@@ -89,7 +92,7 @@ def connect_to_database():
 # Clean latitude and longitude formatting
 def clean_coordinates(coord):
     """ Clean the latitude/longitude by removing non-numeric characters. """
-    return float(coord.replace("°", "").replace("m", "").strip())
+    return float(coord.replace("Â°", "").replace("m", "").strip())
 
 # Add node to the database and check for weather alerts immediately
 def register_node(node_id, latitude, longitude):
@@ -264,7 +267,7 @@ def send_weather_alerts(node_id, latitude, longitude, is_initial_check=False):
 
             if alert_id not in existing_alerts:
                 # New alert detected
-                message = f"🚨 Weather alert:\n{headline}\nSend 'M' for more details."
+                message = f"ðŸš¨ Weather alert:\n{headline}\nSend 'M' for more details."
                 send_message(node_id, message)
                 new_alerts_sent = True
                 # Insert the alert into the database
@@ -279,7 +282,7 @@ def send_weather_alerts(node_id, latitude, longitude, is_initial_check=False):
         for alert_id in canceled_alerts:
             canceled_headline = existing_alerts[alert_id]
             print(f"Removed alert {alert_id} for node {node_id}")
-            send_message(node_id, f"⚠️ Weather alert canceled: {canceled_headline}")
+            send_message(node_id, f"âš ï¸ Weather alert canceled: {canceled_headline}")
             # Remove the alert from the database
             cursor.execute(
                 "DELETE FROM node_alerts WHERE node_id = %s AND alert_id = %s",
@@ -290,11 +293,11 @@ def send_weather_alerts(node_id, latitude, longitude, is_initial_check=False):
         # Check if there are new active alerts after cancellations
         if canceled_alerts and current_alerts:
             active_alerts_summary = "\n".join(
-                [f"🚨 Active alert: {headline}" for headline in current_alerts.values()]
+                [f"ðŸš¨ Active alert: {headline}" for headline in current_alerts.values()]
             )
             send_message(node_id, f"Following the cancellation, these alerts remain active:\n{active_alerts_summary}")
         elif canceled_alerts and not current_alerts:
-            send_message(node_id, "✅ All clear! No active weather alerts for your location.")
+            send_message(node_id, "âœ… All clear! No active weather alerts for your location.")
 
     except mysql.connector.Error as err:
         print(f"Error processing weather alerts for node {node_id}: {err}")
@@ -335,6 +338,9 @@ def check_weather_alerts():
         nodes = cursor.fetchall()
 
         for node in nodes:
+            curr = time.ctime()
+            print("")
+            print("Current time:", curr)
             node_id = str(node['node_id']).strip()  # Ensure node_id is treated as a string and stripped of extra spaces
             db_latitude = node['latitude']
             db_longitude = node['longitude']
@@ -396,41 +402,59 @@ def check_weather_alerts():
         print("Database connection failed. Cannot check weather alerts.")
 
     # Schedule the next execution in 15 minutes
+    curr = time.ctime()
+    nextcheck = time.time() + 900
+    nextcheck2 = time.ctime(nextcheck)
+    print("")
+    print("Current time: ", curr)
+    print("Next Check: ", nextcheck2)
     threading.Timer(900, check_weather_alerts).start()
 
 # Parse node information data returned from Meshtastic API
 def parse_nodes_data(nodes_data):
-    # Split the raw data by new lines to get each row
     rows = nodes_data.split("\n")
-
-    # Initialize a list to hold the nodes as dictionaries
     nodes = []
 
     for row in rows:
-        # Skip table border lines and titles
-        if not row.strip().startswith("│"):
+        # only data rows start with the boxâ€drawing vertical bar
+        if not row.lstrip().startswith("â”‚"):
             continue
 
-        # Split each row into columns using '│' as delimiter
-        columns = [col.strip() for col in row.split("│") if col.strip()]
+        # normalize to a simple '|' delimiter
+        norm = row.replace("â”‚", "|").replace("Ã¢â€â€š", "|")
+        parts = [col.strip() for col in norm.split("|")]
 
-        # Check that the row has enough columns before accessing them
-        if len(columns) >= 18:
-            node = {
-                "User": columns[1],
-                "ID": columns[2],
-                "AKA": columns[3],
-                "Hardware": columns[4],
-                "Pubkey": columns[5],
-                "Role": columns[6],
-                "Latitude": columns[7],
-                "Longitude": columns[8],
-                "Altitude": columns[9],
-                "Battery": columns[10],
-                "LastHeard": columns[16],
-                "Since": columns[17]
-            }
-            nodes.append(node)
+        # drop any leading/trailing empty strings
+        while parts and parts[0] == "":
+            parts.pop(0)
+        while parts and parts[-1] == "":
+            parts.pop()
+
+        # now we should have at least 17 fields: index + 16 data columns
+        if len(parts) < 17:
+            continue
+
+        # map to your fields, using negative indices for the last two
+        node = {
+            "User":      parts[1],
+            "ID":        parts[2],
+            "AKA":       parts[3],
+            "Hardware":  parts[4],
+            "Pubkey":    parts[5],
+            "Role":      parts[6],
+            "Latitude":  parts[7],
+            "Longitude": parts[8],
+            "Altitude":  parts[9],
+            "Battery":   parts[10],
+            # â€¦
+            "LastHeard": parts[-2],
+            "Since":     parts[-1],
+        }
+        nodes.append(node)
+
+    # debug print
+    for n in nodes:
+        print(f"Parsed Node ID: {n['ID']} | User: {n['User']} | Lat: {n['Latitude']} | Lon: {n['Longitude']}")
 
     return nodes
 
@@ -444,7 +468,7 @@ def get_node_info(node_id):
         nodes = parse_nodes_data(nodes_data)  # Parse the data into a list of dictionaries
 
         for n in nodes:
-            if n.get('ID', '').strip() == hex_node_id:
+            if n.get('ID', '').strip().lower() == hex_node_id.lower():
                 latitude = n.get('Latitude')
                 longitude = n.get('Longitude')
                 # Clean up and validate coordinates before returning
@@ -514,8 +538,8 @@ def get_current_weather(location):
                 return f"Could not resolve location '{location}'. Please provide valid coordinates."
         else:  # Latitude, Longitude format
             try:
-                # Remove any non-numeric characters (like '°') before splitting
-                location = location.replace('°', '').strip()
+                # Remove any non-numeric characters (like 'Â°') before splitting
+                location = location.replace('Â°', '').strip()
                 latitude, longitude = map(float, location.split())
                 print(f"Parsed coordinates: Latitude: {latitude}, Longitude: {longitude}")  # Debugging line
                 latitude = clean_coordinates(str(latitude))
@@ -568,7 +592,7 @@ def get_tomorrow_weather(location):
                 return f"Could not resolve location '{location}'. Please provide valid coordinates."
         else:  # Latitude, Longitude format
             try:
-                location = location.replace('°', '').strip()
+                location = location.replace('Â°', '').strip()
                 latitude, longitude = map(float, location.split())
                 print(f"Parsed coordinates: Latitude: {latitude}, Longitude: {longitude}")  # Debugging line
                 latitude = clean_coordinates(str(latitude))
@@ -619,7 +643,7 @@ def get_five_day_forecast(location):
                 return f"Could not resolve location '{location}'. Please provide valid coordinates."
         else:  # Latitude, Longitude format
             try:
-                location = location.replace('°', '').strip()
+                location = location.replace('Â°', '').strip()
                 latitude, longitude = map(float, location.split())
                 print(f"Parsed coordinates: Latitude: {latitude}, Longitude: {longitude}")  # Debugging line
                 latitude = clean_coordinates(str(latitude))
@@ -761,7 +785,7 @@ def process_node_alerts(node_id, all_alert_details):
                 details = all_alert_details.get(alert_id, "Details unavailable")
 
                 print(f"Debug: Processing alert {alert_id} for node {node_id}")
-                send_message(node_id, f"🚨 {headline}\n{details}")
+                send_message(node_id, f"ðŸš¨ {headline}\n{details}")
         except mysql.connector.Error as err:
             print(f"Error processing alerts for node {node_id}: {err}")
         finally:
@@ -1018,7 +1042,7 @@ def handle_message(packet):
 
                 else:
                     print(f"Unrecognized message from node {node_id}: {message_text}")
-                    send_message(node_id, "DESCRIPTION\n\n☀️Weather Bot USA☀️\n\nI allow you to receive weather and alerts for your location.")
+                    send_message(node_id, "DESCRIPTION\n\nâ˜€ï¸Weather Bot USAâ˜€ï¸\n\nI allow you to receive weather and alerts for your location.")
                     send_message(node_id, "OPTIONS\n\nBased on nodes GPS\n\n(C) Current Weather\n(T) Tomorrows Weather\n(5) 5-day forecast\n(S) Subscribe to Weather Alerts\n(U) Unsubscribe")
                     send_message(node_id, "EXPANDED\n\nFor Static Location / No GPS\n\n(C,T,S,5) <latitude> <longitude>\n(C,T,S,5) <City, State>\n\nYou can also send 'current', 'subscribe', '5-day'")
 
@@ -1034,6 +1058,20 @@ def onConnection(interface, topic=pub.AUTO_TOPIC):
 
 # Initialize TCP interface and subscribe to events
 interface = meshtastic.tcp_interface.TCPInterface(hostname=hostname)
+
+if not VERBOSE:
+    # suppress interface.showNodes() console output
+    _real_show = interface.showNodes
+    def showNodes_quiet(*args, **kwargs):
+        buf = io.StringIO()
+        old_stdout = sys.stdout
+        sys.stdout = buf
+        try:
+            return _real_show(*args, **kwargs)
+        finally:
+            sys.stdout = old_stdout
+    interface.showNodes = showNodes_quiet
+
 pub.subscribe(onReceive, "meshtastic.receive")
 pub.subscribe(onConnection, "meshtastic.connection.established")
 
